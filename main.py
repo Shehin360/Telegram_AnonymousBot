@@ -202,12 +202,10 @@ class UserState:
 
 def get_user_state(user_id: int) -> UserState:
     """Get user state from SQLite or create new one."""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    data = c.fetchone()
-    conn.close()
+    with sqlite3.connect('database.db') as conn:
+        c = conn.cursor()
+        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        data = c.fetchone()
     
     if data:
         # Convert tuple to dict
@@ -220,33 +218,30 @@ def get_user_state(user_id: int) -> UserState:
 
 def save_user_state(user_state: UserState) -> None:
     """Save user state to SQLite."""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    data = user_state.to_dict()
-    c.execute('''INSERT OR REPLACE INTO users 
-                 (user_id, is_active, current_chat, last_activity, country, language, gender,
-                  karma, total_chats, positive_ratings, current_streak, best_streak, 
-                  achievements, reveal_requested, username)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user_state.user_id,
-               int(data['is_active']),
-               data['current_chat'],
-               data['last_activity'],
-               data['country'],
-               data['language'],
-               data['gender'],
-               data['karma'],
-               data['total_chats'],
-               data['positive_ratings'],
-               data['current_streak'],
-               data['best_streak'],
-               data['achievements'],
-               int(data['reveal_requested']),
-               data['username']))
-    
-    conn.commit()
-    conn.close()
+    with sqlite3.connect('database.db') as conn:
+        c = conn.cursor()
+        data = user_state.to_dict()
+        c.execute('''INSERT OR REPLACE INTO users 
+                     (user_id, is_active, current_chat, last_activity, country, language, gender,
+                      karma, total_chats, positive_ratings, current_streak, best_streak, 
+                      achievements, reveal_requested, username)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user_state.user_id,
+                   int(data['is_active']),
+                   data['current_chat'],
+                   data['last_activity'],
+                   data['country'],
+                   data['language'],
+                   data['gender'],
+                   data['karma'],
+                   data['total_chats'],
+                   data['positive_ratings'],
+                   data['current_streak'],
+                   data['best_streak'],
+                   data['achievements'],
+                   int(data['reveal_requested']),
+                   data['username']))
+        conn.commit()
 
 def check_compatibility(user1_state: UserState, user2_state: UserState) -> bool:
     """Check if two users are compatible based on their settings."""
@@ -273,9 +268,6 @@ def check_compatibility(user1_state: UserState, user2_state: UserState) -> bool:
 
 def find_random_match(user_id: int) -> Optional[int]:
     """Find a random active user who is not the current user and matches preferences."""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
     # Get current user's state
     current_user_state = get_user_state(user_id)
     
@@ -286,15 +278,16 @@ def find_random_match(user_id: int) -> Optional[int]:
             # Reset match start time
             current_user_state.match_start_time = None
             save_user_state(current_user_state)
-            conn.close()
             return None
     
     # Get all active users except the current user who are not in a chat
-    c.execute('''SELECT user_id FROM users 
-                 WHERE is_active = 1 
-                 AND current_chat IS NULL 
-                 AND user_id != ?''', (user_id,))
-    active_users = c.fetchall()
+    with sqlite3.connect('database.db') as conn:
+        c = conn.cursor()
+        c.execute('''SELECT user_id FROM users 
+                     WHERE is_active = 1 
+                     AND current_chat IS NULL 
+                     AND user_id != ?''', (user_id,))
+        active_users = c.fetchall()
     
     # Shuffle the list to randomize
     random.shuffle(active_users)
@@ -310,7 +303,6 @@ def find_random_match(user_id: int) -> Optional[int]:
             potential_match_state.match_start_time = None
             save_user_state(current_user_state)
             save_user_state(potential_match_state)
-            conn.close()
             return potential_match_id
     
     # If no match found and user wasn't already waiting, set match start time
@@ -318,7 +310,6 @@ def find_random_match(user_id: int) -> Optional[int]:
         current_user_state.match_start_time = datetime.now()
         save_user_state(current_user_state)
     
-    conn.close()
     return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -431,14 +422,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
 
     if query.data == 'show_active':
-        conn = sqlite3.connect('database.db')
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users WHERE is_active = 1')
-        count = c.fetchone()[0]
-        conn.close()
+        with sqlite3.connect('database.db') as conn:
+            c = conn.cursor()
+            c.execute('SELECT COUNT(*) FROM users WHERE is_active = 1')
+            count = c.fetchone()[0]
         await query.edit_message_text(f"Active users: {count}")
         # Show main menu again after 2 seconds
-        time.sleep(2)
+        await asyncio.sleep(2)
         await show_main_menu(update, context)
     
     elif query.data == 'toggle_active':
@@ -665,7 +655,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Clear rating context
         del context.user_data['rate_partner_id']
         
-        time.sleep(1)
+        await asyncio.sleep(1)
         await show_main_menu(update, context)
 
     elif query.data == 'skip_rating':
@@ -685,13 +675,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         if not user_state.is_active:
             await query.edit_message_text("You need to be active to find a match!")
-            time.sleep(2)
+            await asyncio.sleep(2)
             await show_main_menu(update, context)
             return
         
         if user_state.current_chat:
             await query.edit_message_text("You are already in a chat!")
-            time.sleep(2)
+            await asyncio.sleep(2)
             await show_main_menu(update, context)
             return
         
@@ -708,12 +698,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await query.edit_message_text("No match found after waiting too long. Please try again later!")
                     user_state.match_start_time = None
                     save_user_state(user_state)
-                    time.sleep(2)
+                    await asyncio.sleep(2)
                     await show_main_menu(update, context)
                     return
             
             await query.edit_message_text("No matches found at the moment. We'll keep looking!")
-            time.sleep(2)
+            await asyncio.sleep(2)
             await show_main_menu(update, context)
 
 def process_message_queue():
@@ -723,32 +713,32 @@ def process_message_queue():
         try:
             # Check for inactive chats
             current_time = datetime.now()
-            conn = sqlite3.connect('database.db')
-            c = conn.cursor()
-            
-            # Get all users in chats
-            c.execute('SELECT user_id, current_chat, last_activity FROM users WHERE current_chat IS NOT NULL')
-            active_chats = c.fetchall()
+            with sqlite3.connect('database.db') as conn:
+                c = conn.cursor()
+                # Get all users in chats
+                c.execute('SELECT user_id, current_chat, last_activity FROM users WHERE current_chat IS NOT NULL')
+                active_chats = c.fetchall()
             
             for user_id, partner_id, last_activity in active_chats:
-                last_activity = datetime.fromisoformat(last_activity)
-                if (current_time - last_activity).total_seconds() > INACTIVITY_TIMEOUT:
-                    # End the chat due to inactivity
-                    user_state = get_user_state(user_id)
-                    partner_state = get_user_state(partner_id)
-                    
-                    # Clear chat states
-                    user_state.current_chat = None
-                    partner_state.current_chat = None
-                    
-                    save_user_state(user_state)
-                    save_user_state(partner_state)
-                    
-                    # Queue notifications
-                    queue_message(user_id, "Chat ended due to inactivity!")
-                    queue_message(partner_id, "Chat ended due to inactivity!")
-            
-            conn.close()
+                try:
+                    last_activity = datetime.fromisoformat(last_activity)
+                    if (current_time - last_activity).total_seconds() > INACTIVITY_TIMEOUT:
+                        # End the chat due to inactivity
+                        user_state = get_user_state(user_id)
+                        partner_state = get_user_state(partner_id)
+                        
+                        # Clear chat states
+                        user_state.current_chat = None
+                        partner_state.current_chat = None
+                        
+                        save_user_state(user_state)
+                        save_user_state(partner_state)
+                        
+                        # Queue notifications
+                        queue_message(user_id, "Chat ended due to inactivity!")
+                        queue_message(partner_id, "Chat ended due to inactivity!")
+                except Exception as e:
+                    logger.error(f"Error checking inactive chat: {e}")
 
             with MESSAGE_QUEUE_LOCK:
                 if not MESSAGE_QUEUE:
@@ -759,23 +749,26 @@ def process_message_queue():
                 chat_id, content = MESSAGE_QUEUE.popleft()
             
             # Check the type of content and handle accordingly
-            if isinstance(content, tuple):
-                # Handle photo messages (chat_id, photo, caption)
-                chat_id, photo, caption = content
-                asyncio.run_coroutine_threadsafe(
-                    BOT_INSTANCE.send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=caption
-                    ),
-                    QUEUE_LOOP
-                ).result(timeout=10)
-            elif isinstance(content, str):
-                # Handle text messages
-                asyncio.run_coroutine_threadsafe(
-                    BOT_INSTANCE.send_message(chat_id=chat_id, text=content),
-                    QUEUE_LOOP
-                ).result(timeout=10)
+            try:
+                if isinstance(content, tuple):
+                    # Handle photo messages (chat_id, photo, caption)
+                    chat_id, photo, caption = content
+                    asyncio.run_coroutine_threadsafe(
+                        BOT_INSTANCE.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=caption
+                        ),
+                        QUEUE_LOOP
+                    ).result(timeout=10)
+                elif isinstance(content, str):
+                    # Handle text messages
+                    asyncio.run_coroutine_threadsafe(
+                        BOT_INSTANCE.send_message(chat_id=chat_id, text=content, parse_mode='Markdown'),
+                        QUEUE_LOOP
+                    ).result(timeout=10)
+            except Exception as e:
+                logger.error(f"Error sending message to {chat_id}: {e}")
             
             # Wait to respect rate limit
             time.sleep(1/MESSAGE_RATE_LIMIT)
@@ -967,20 +960,45 @@ async def typing_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Send typing indicator to partner
     queue_message(user_state.current_chat, "✍️ _Your partner is typing..._")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors caused by updates."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    # Notify user about the error
+    if update and update.effective_user:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="⚠️ An error occurred. Please try again."
+            )
+        except Exception:
+            pass  # Ignore errors when sending error message
+
 def main() -> None:
     """Start the bot."""
     global RUNNING, MESSAGE_QUEUE_THREAD, BOT_INSTANCE, QUEUE_LOOP
     
+    # Validate token
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        logger.error("BOT_TOKEN not found in environment variables!")
+        return
+    
+    logger.info("Initializing bot...")
+    
     # Create the Application and pass it your bot's token
-    application = Application.builder().token(os.getenv('BOT_TOKEN')).build()
+    application = Application.builder().token(token).build()
     BOT_INSTANCE = application.bot
 
     # Create a dedicated event loop for the message queue
     QUEUE_LOOP = asyncio.new_event_loop()
-    asyncio.set_event_loop(QUEUE_LOOP)
-
+    
     # Start the message queue processor in a separate thread
-    MESSAGE_QUEUE_THREAD = threading.Thread(target=process_message_queue, daemon=True)
+    def run_queue_loop():
+        asyncio.set_event_loop(QUEUE_LOOP)
+        process_message_queue()
+    
+    MESSAGE_QUEUE_THREAD = threading.Thread(target=run_queue_loop, daemon=True)
     MESSAGE_QUEUE_THREAD.start()
 
     # Add handlers
@@ -996,10 +1014,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.AUDIO & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.VIDEO_NOTE & ~filters.COMMAND, message_handler))
-    logger.info("Starting bot...")
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
+    
+    logger.info("Bot is starting... Listening for updates.")
     
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
@@ -1008,9 +1030,10 @@ def main() -> None:
         # Stop the message queue thread
         RUNNING = False
         if MESSAGE_QUEUE_THREAD:
-            MESSAGE_QUEUE_THREAD.join()
+            MESSAGE_QUEUE_THREAD.join(timeout=5)
         if QUEUE_LOOP:
             QUEUE_LOOP.close()
+        logger.info("Bot shutdown complete.")
     
 if __name__ == '__main__':
     main()
