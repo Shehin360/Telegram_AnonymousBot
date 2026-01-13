@@ -42,7 +42,41 @@ def init_db():
                   last_activity TEXT,
                   country TEXT,
                   language TEXT,
-                  gender TEXT)''')
+                  gender TEXT,
+                  karma INTEGER DEFAULT 0,
+                  total_chats INTEGER DEFAULT 0,
+                  positive_ratings INTEGER DEFAULT 0,
+                  current_streak INTEGER DEFAULT 0,
+                  best_streak INTEGER DEFAULT 0,
+                  achievements TEXT DEFAULT '',
+                  reveal_requested INTEGER DEFAULT 0,
+                  username TEXT)''')
+    
+    # Add new columns if they don't exist (for existing databases)
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN karma INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN total_chats INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN positive_ratings INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN current_streak INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN best_streak INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN achievements TEXT DEFAULT ""')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN reveal_requested INTEGER DEFAULT 0')
+    except: pass
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN username TEXT')
+    except: pass
     
     conn.commit()
     conn.close()
@@ -61,6 +95,49 @@ RUNNING = True
 BOT_INSTANCE = None
 QUEUE_LOOP = None
 
+# Achievement definitions
+ACHIEVEMENTS = {
+    'first_chat': {'name': '🎉 First Chat', 'desc': 'Complete your first chat', 'requirement': lambda u: u.total_chats >= 1},
+    'social_butterfly': {'name': '🦋 Social Butterfly', 'desc': 'Complete 10 chats', 'requirement': lambda u: u.total_chats >= 10},
+    'chat_master': {'name': '👑 Chat Master', 'desc': 'Complete 50 chats', 'requirement': lambda u: u.total_chats >= 50},
+    'legend': {'name': '🏆 Legend', 'desc': 'Complete 100 chats', 'requirement': lambda u: u.total_chats >= 100},
+    'streak_starter': {'name': '🔥 Streak Starter', 'desc': 'Get a 3-chat streak', 'requirement': lambda u: u.best_streak >= 3},
+    'on_fire': {'name': '💥 On Fire', 'desc': 'Get a 10-chat streak', 'requirement': lambda u: u.best_streak >= 10},
+    'unstoppable': {'name': '⚡ Unstoppable', 'desc': 'Get a 25-chat streak', 'requirement': lambda u: u.best_streak >= 25},
+    'loved': {'name': '❤️ Loved', 'desc': 'Receive 10 positive ratings', 'requirement': lambda u: u.positive_ratings >= 10},
+    'superstar': {'name': '⭐ Superstar', 'desc': 'Receive 50 positive ratings', 'requirement': lambda u: u.positive_ratings >= 50},
+    'karma_king': {'name': '👼 Karma King', 'desc': 'Reach 100 karma points', 'requirement': lambda u: u.karma >= 100},
+}
+
+def check_and_award_achievements(user_state) -> list:
+    """Check and award new achievements. Returns list of newly earned achievements."""
+    new_achievements = []
+    current_achievements = user_state.achievements.split(',') if user_state.achievements else []
+    
+    for achievement_id, achievement in ACHIEVEMENTS.items():
+        if achievement_id not in current_achievements:
+            if achievement['requirement'](user_state):
+                current_achievements.append(achievement_id)
+                new_achievements.append(achievement)
+    
+    user_state.achievements = ','.join([a for a in current_achievements if a])
+    return new_achievements
+
+def get_karma_title(karma: int) -> str:
+    """Get a title based on karma level."""
+    if karma < 0:
+        return "😈 Troublemaker"
+    elif karma < 10:
+        return "🌱 Newcomer"
+    elif karma < 50:
+        return "😊 Friendly"
+    elif karma < 100:
+        return "🌟 Popular"
+    elif karma < 250:
+        return "💎 Trusted"
+    else:
+        return "👑 Elite"
+
 class UserState:
     def __init__(self, user_id: int):
         self.user_id = user_id
@@ -73,6 +150,15 @@ class UserState:
             'gender': None
         }
         self.match_start_time = None
+        # New fields for karma, streaks, achievements
+        self.karma = 0
+        self.total_chats = 0
+        self.positive_ratings = 0
+        self.current_streak = 0
+        self.best_streak = 0
+        self.achievements = ''
+        self.reveal_requested = False
+        self.username = None
 
     def to_dict(self) -> dict:
         return {
@@ -81,7 +167,15 @@ class UserState:
             'last_activity': self.last_activity.isoformat(),
             'country': self.settings['country'],
             'language': self.settings['language'],
-            'gender': self.settings['gender']
+            'gender': self.settings['gender'],
+            'karma': self.karma,
+            'total_chats': self.total_chats,
+            'positive_ratings': self.positive_ratings,
+            'current_streak': self.current_streak,
+            'best_streak': self.best_streak,
+            'achievements': self.achievements,
+            'reveal_requested': self.reveal_requested,
+            'username': self.username
         }
 
     @classmethod
@@ -96,6 +190,14 @@ class UserState:
             'gender': data.get('gender')
         }
         state.match_start_time = data.get('match_start_time')
+        state.karma = data.get('karma', 0) or 0
+        state.total_chats = data.get('total_chats', 0) or 0
+        state.positive_ratings = data.get('positive_ratings', 0) or 0
+        state.current_streak = data.get('current_streak', 0) or 0
+        state.best_streak = data.get('best_streak', 0) or 0
+        state.achievements = data.get('achievements', '') or ''
+        state.reveal_requested = bool(data.get('reveal_requested', 0))
+        state.username = data.get('username')
         return state
 
 def get_user_state(user_id: int) -> UserState:
@@ -109,7 +211,9 @@ def get_user_state(user_id: int) -> UserState:
     
     if data:
         # Convert tuple to dict
-        columns = ['user_id', 'is_active', 'current_chat', 'last_activity', 'country', 'language', 'gender']
+        columns = ['user_id', 'is_active', 'current_chat', 'last_activity', 'country', 'language', 'gender',
+                   'karma', 'total_chats', 'positive_ratings', 'current_streak', 'best_streak', 
+                   'achievements', 'reveal_requested', 'username']
         data_dict = dict(zip(columns, data))
         return UserState.from_dict(user_id, data_dict)
     return UserState(user_id)
@@ -121,15 +225,25 @@ def save_user_state(user_state: UserState) -> None:
     
     data = user_state.to_dict()
     c.execute('''INSERT OR REPLACE INTO users 
-                 (user_id, is_active, current_chat, last_activity, country, language, gender)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                 (user_id, is_active, current_chat, last_activity, country, language, gender,
+                  karma, total_chats, positive_ratings, current_streak, best_streak, 
+                  achievements, reveal_requested, username)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
               (user_state.user_id,
                int(data['is_active']),
                data['current_chat'],
                data['last_activity'],
                data['country'],
                data['language'],
-               data['gender']))
+               data['gender'],
+               data['karma'],
+               data['total_chats'],
+               data['positive_ratings'],
+               data['current_streak'],
+               data['best_streak'],
+               data['achievements'],
+               int(data['reveal_requested']),
+               data['username']))
     
     conn.commit()
     conn.close()
@@ -210,23 +324,33 @@ def find_random_match(user_id: int) -> Optional[int]:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
+    
+    # Save username for potential reveal later
+    user_state = get_user_state(user.id)
+    if user.username:
+        user_state.username = user.username
+        save_user_state(user_state)
+    
     description = (
-        "Welcome to the Anonymous P2P Chat Bot!\n\n"
-        "How it works:\n"
-        "- This bot lets you chat anonymously with random users.\n"
-        "- You can set preferences (country, language, gender) to match with similar users.\n"
-        "- Only text and photo messages are allowed.\n"
-        "- Chats are ended automatically after 1 hour of inactivity.\n\n"
-        "Commands and Features:\n"
-        "/start - Show this message and the main menu.\n"
-        "/end - End your current anonymous chat.\n"
-        "Show Active Users - See how many users are currently online.\n"
-        "Status: Online/Offline - Toggle your availability for matching.\n"
-        "Settings - Set or clear your country, language, or gender preferences.\n"
-        "Find Match - Start searching for a random chat partner.\n\n"
-        "Use the menu buttons to navigate. Enjoy chatting!"
+        "🎭 **Welcome to Anonymous P2P Chat Bot!**\n\n"
+        "**How it works:**\n"
+        "• Chat anonymously with random users\n"
+        "• Set preferences to match with similar users\n"
+        "• Earn karma, streaks, and achievements!\n"
+        "• Only text and photos allowed\n\n"
+        "**Commands:**\n"
+        "/start - Show this menu\n"
+        "/end - End current chat (& rate partner)\n"
+        "/reveal - Request mutual profile reveal\n"
+        "/typing - Show typing indicator\n\n"
+        "**New Features:**\n"
+        "⭐ Karma System - Get rated by chat partners\n"
+        "🔥 Streaks - Build consecutive positive chats\n"
+        "🏆 Achievements - Unlock badges as you chat\n"
+        "🤝 Profile Reveal - Share profiles if both agree\n\n"
+        "Use the menu buttons below. Enjoy chatting!"
     )
-    await update.message.reply_text(description)
+    await update.message.reply_text(description, parse_mode='Markdown')
     await show_main_menu(update, context)
 
 def get_main_menu_markup(is_active: bool) -> InlineKeyboardMarkup:
@@ -240,6 +364,10 @@ def get_main_menu_markup(is_active: bool) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("Settings", callback_data='settings'),
             InlineKeyboardButton("Find Match", callback_data='find_match')
+        ],
+        [
+            InlineKeyboardButton("📊 My Profile", callback_data='my_profile'),
+            InlineKeyboardButton("🏆 Achievements", callback_data='achievements')
         ]
     ])
 
@@ -429,9 +557,131 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         save_user_state(user_state)
         await show_settings_menu(update, context)
 
+    elif query.data == 'my_profile':
+        user_id = query.from_user.id
+        user_state = get_user_state(user_id)
+        
+        # Count achievements
+        achievement_count = len([a for a in user_state.achievements.split(',') if a])
+        total_achievements = len(ACHIEVEMENTS)
+        
+        profile_text = (
+            f"📊 **Your Profile**\n\n"
+            f"🎭 Title: {get_karma_title(user_state.karma)}\n"
+            f"⭐ Karma: {user_state.karma}\n"
+            f"💬 Total Chats: {user_state.total_chats}\n"
+            f"👍 Positive Ratings: {user_state.positive_ratings}\n"
+            f"🔥 Current Streak: {user_state.current_streak}\n"
+            f"🏆 Best Streak: {user_state.best_streak}\n"
+            f"🎖️ Achievements: {achievement_count}/{total_achievements}\n"
+        )
+        
+        keyboard = [[InlineKeyboardButton("Back to Main Menu", callback_data='back_to_main')]]
+        await query.edit_message_text(profile_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif query.data == 'achievements':
+        user_id = query.from_user.id
+        user_state = get_user_state(user_id)
+        
+        earned = user_state.achievements.split(',') if user_state.achievements else []
+        
+        text = "🏆 **Achievements**\n\n"
+        for achievement_id, achievement in ACHIEVEMENTS.items():
+            if achievement_id in earned:
+                text += f"✅ {achievement['name']}\n   _{achievement['desc']}_\n\n"
+            else:
+                text += f"🔒 {achievement['name']}\n   _{achievement['desc']}_\n\n"
+        
+        keyboard = [[InlineKeyboardButton("Back to Main Menu", callback_data='back_to_main')]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif query.data == 'request_reveal':
+        user_id = query.from_user.id
+        user_state = get_user_state(user_id)
+        
+        if not user_state.current_chat:
+            await query.edit_message_text("You're not in a chat!")
+            return
+        
+        partner_state = get_user_state(user_state.current_chat)
+        
+        # Mark that this user wants to reveal
+        user_state.reveal_requested = True
+        save_user_state(user_state)
+        
+        # Check if partner also requested reveal
+        if partner_state.reveal_requested:
+            # Both agreed! Reveal profiles to each other
+            user_username = user_state.username or "No username set"
+            partner_username = partner_state.username or "No username set"
+            
+            queue_message(user_id, f"🎉 **Mutual Reveal!**\n\nYour partner's profile:\n👤 Username: @{partner_username}\n⭐ Karma: {partner_state.karma}\n🎭 Title: {get_karma_title(partner_state.karma)}")
+            queue_message(user_state.current_chat, f"🎉 **Mutual Reveal!**\n\nYour partner's profile:\n👤 Username: @{user_username}\n⭐ Karma: {user_state.karma}\n🎭 Title: {get_karma_title(user_state.karma)}")
+            
+            # Reset reveal flags
+            user_state.reveal_requested = False
+            partner_state.reveal_requested = False
+            save_user_state(user_state)
+            save_user_state(partner_state)
+        else:
+            queue_message(user_id, "✨ You've requested to reveal profiles. Waiting for your partner to agree...")
+            queue_message(user_state.current_chat, "💫 Your chat partner wants to reveal profiles! Use /reveal if you agree.")
+
+    elif query.data.startswith('rate_'):
+        user_id = query.from_user.id
+        rating_type = query.data.split('_')[1]  # 'positive' or 'negative'
+        
+        # Get the partner ID from context
+        partner_id = context.user_data.get('rate_partner_id')
+        if not partner_id:
+            await query.edit_message_text("Rating session expired.")
+            await show_main_menu(update, context)
+            return
+        
+        partner_state = get_user_state(partner_id)
+        user_state = get_user_state(user_id)
+        
+        if rating_type == 'positive':
+            partner_state.karma += 5
+            partner_state.positive_ratings += 1
+            user_state.current_streak += 1
+            if user_state.current_streak > user_state.best_streak:
+                user_state.best_streak = user_state.current_streak
+            await query.edit_message_text("👍 Thanks for the positive rating!")
+        else:
+            partner_state.karma -= 3
+            user_state.current_streak = 0  # Reset streak on negative rating
+            await query.edit_message_text("👎 Thanks for your feedback.")
+        
+        # Check for new achievements
+        new_achievements = check_and_award_achievements(user_state)
+        save_user_state(partner_state)
+        save_user_state(user_state)
+        
+        # Notify about new achievements
+        for achievement in new_achievements:
+            queue_message(user_id, f"🎉 Achievement Unlocked: {achievement['name']}\n_{achievement['desc']}_")
+        
+        # Clear rating context
+        del context.user_data['rate_partner_id']
+        
+        time.sleep(1)
+        await show_main_menu(update, context)
+
+    elif query.data == 'skip_rating':
+        await query.edit_message_text("Rating skipped.")
+        if 'rate_partner_id' in context.user_data:
+            del context.user_data['rate_partner_id']
+        await show_main_menu(update, context)
+
     elif query.data == 'find_match':
         user_id = query.from_user.id
         user_state = get_user_state(user_id)
+        
+        # Save username for potential reveal later
+        if update.effective_user.username:
+            user_state.username = update.effective_user.username
+            save_user_state(user_state)
         
         if not user_state.is_active:
             await query.edit_message_text("You need to be active to find a match!")
@@ -596,6 +846,14 @@ async def start_chat(user1_id: int, user2_id: int, bot) -> None:
     user1_state.current_chat = user2_id
     user2_state.current_chat = user1_id
     
+    # Reset reveal flags
+    user1_state.reveal_requested = False
+    user2_state.reveal_requested = False
+    
+    # Increment total chats
+    user1_state.total_chats += 1
+    user2_state.total_chats += 1
+    
     # Set last_activity to now for both users
     user1_state.last_activity = datetime.now()
     user2_state.last_activity = datetime.now()
@@ -603,9 +861,20 @@ async def start_chat(user1_id: int, user2_id: int, bot) -> None:
     save_user_state(user1_state)
     save_user_state(user2_state)
     
-    # Queue notifications instead of sending directly
-    queue_message(user1_id, "Chat started! You can now send messages. Use /end to end the chat.")
-    queue_message(user2_id, "Chat started! You can now send messages. Use /end to end the chat.")
+    # Create partner info messages
+    user1_partner_info = f"🎉 **Chat Started!**\n\n👤 Your partner: {get_karma_title(user2_state.karma)}\n⭐ Karma: {user2_state.karma}\n\n💡 Commands:\n/end - End the chat\n/reveal - Request to share profiles\n/typing - Show typing indicator\n\nEnjoy your conversation!"
+    user2_partner_info = f"🎉 **Chat Started!**\n\n👤 Your partner: {get_karma_title(user1_state.karma)}\n⭐ Karma: {user1_state.karma}\n\n💡 Commands:\n/end - End the chat\n/reveal - Request to share profiles\n/typing - Show typing indicator\n\nEnjoy your conversation!"
+    
+    # Queue notifications with partner info
+    queue_message(user1_id, user1_partner_info)
+    queue_message(user2_id, user2_partner_info)
+    
+    # Check for achievements
+    for user_state, user_id in [(user1_state, user1_id), (user2_state, user2_id)]:
+        new_achievements = check_and_award_achievements(user_state)
+        save_user_state(user_state)
+        for achievement in new_achievements:
+            queue_message(user_id, f"🎉 Achievement Unlocked: {achievement['name']}\n_{achievement['desc']}_")
 
 async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """End the current chat."""
@@ -616,21 +885,87 @@ async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         partner_id = user_state.current_chat
         partner_state = get_user_state(partner_id)
         
-        # Clear chat states
+        # Clear chat states and reveal flags
         user_state.current_chat = None
         partner_state.current_chat = None
+        user_state.reveal_requested = False
+        partner_state.reveal_requested = False
         
         save_user_state(user_state)
         save_user_state(partner_state)
         
-        # Queue notifications
-        queue_message(user_id, "Chat ended!")
-        await show_main_menu(update, context)
+        # Store partner ID for rating
+        context.user_data['rate_partner_id'] = partner_id
         
-        queue_message(partner_id, "Your chat partner has ended the conversation.")
+        # Show rating prompt to the user who ended the chat
+        rating_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👍 Positive", callback_data='rate_positive'),
+                InlineKeyboardButton("👎 Negative", callback_data='rate_negative')
+            ],
+            [InlineKeyboardButton("⏭️ Skip Rating", callback_data='skip_rating')]
+        ])
+        
+        await update.message.reply_text(
+            "💬 Chat ended!\n\nHow was your conversation? Rate your partner:",
+            reply_markup=rating_keyboard
+        )
+        
+        # Notify partner
+        queue_message(partner_id, "👋 Your chat partner has ended the conversation.")
     else:
         queue_message(user_id, "You are not in a chat!")
         await show_main_menu(update, context)
+
+async def reveal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /reveal command to request profile sharing."""
+    user_id = update.effective_user.id
+    user_state = get_user_state(user_id)
+    
+    # Save username for reveal
+    if update.effective_user.username:
+        user_state.username = update.effective_user.username
+        save_user_state(user_state)
+    
+    if not user_state.current_chat:
+        await update.message.reply_text("You're not in a chat!")
+        return
+    
+    partner_state = get_user_state(user_state.current_chat)
+    
+    # Mark that this user wants to reveal
+    user_state.reveal_requested = True
+    save_user_state(user_state)
+    
+    # Check if partner also requested reveal
+    if partner_state.reveal_requested:
+        # Both agreed! Reveal profiles to each other
+        user_username = user_state.username or "No username set"
+        partner_username = partner_state.username or "No username set"
+        
+        queue_message(user_id, f"🎉 **Mutual Reveal!**\n\nYour partner's profile:\n👤 Username: @{partner_username}\n⭐ Karma: {partner_state.karma}\n🎭 Title: {get_karma_title(partner_state.karma)}")
+        queue_message(user_state.current_chat, f"🎉 **Mutual Reveal!**\n\nYour partner's profile:\n👤 Username: @{user_username}\n⭐ Karma: {user_state.karma}\n🎭 Title: {get_karma_title(user_state.karma)}")
+        
+        # Reset reveal flags
+        user_state.reveal_requested = False
+        partner_state.reveal_requested = False
+        save_user_state(user_state)
+        save_user_state(partner_state)
+    else:
+        await update.message.reply_text("✨ You've requested to reveal profiles. Waiting for your partner to agree...")
+        queue_message(user_state.current_chat, "💫 Your chat partner wants to reveal profiles!\nUse /reveal if you agree to share your username.")
+
+async def typing_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /typing command to show typing indicator."""
+    user_id = update.effective_user.id
+    user_state = get_user_state(user_id)
+    
+    if not user_state.current_chat:
+        await update.message.reply_text("You're not in a chat!")
+        return
+    
+    # Send typing indicator to partner
+    queue_message(user_state.current_chat, "✍️ _Your partner is typing..._")
 
 def main() -> None:
     """Start the bot."""
@@ -651,6 +986,8 @@ def main() -> None:
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("end", end_chat))
+    application.add_handler(CommandHandler("reveal", reveal_handler))
+    application.add_handler(CommandHandler("typing", typing_handler))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_handler))
@@ -676,4 +1013,4 @@ def main() -> None:
             QUEUE_LOOP.close()
     
 if __name__ == '__main__':
-    main() 
+    main()
